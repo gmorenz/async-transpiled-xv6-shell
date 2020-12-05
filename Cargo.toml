@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 libc = "0.2.80"
 smol = "1.2.5"
+event-listener = "2.5.1"

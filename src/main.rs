@@ -3,11 +3,24 @@
 #![register_tool(c2rust)]
 #![feature(const_raw_ptr_to_usize_cast, extern_types, main,
            register_tool)]
+
+use std::{
+    io,
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
+    pin::Pin
+};
+use smol::{
+    block_on,
+    LocalExecutor,
+    future::{self, Future, FutureExt},
+    prelude::*,
+};
+
 extern "C" {
     pub type _IO_wide_data;
     pub type _IO_codecvt;
     pub type _IO_marker;
-    static mut stdin: *mut FILE;
     fn dprintf(__fd: libc::c_int, __fmt: *const libc::c_char, _: ...)
      -> libc::c_int;
     fn fgets(__s: *mut libc::c_char, __n: libc::c_int, __stream: *mut FILE)
@@ -17,7 +30,6 @@ extern "C" {
     fn strchr(_: *const libc::c_char, _: libc::c_int) -> *mut libc::c_char;
     fn strlen(_: *const libc::c_char) -> libc::c_ulong;
     fn malloc(_: libc::c_ulong) -> *mut libc::c_void;
-    fn exit(_: libc::c_int) -> !;
     fn close(__fd: libc::c_int) -> libc::c_int;
     fn pipe(__pipedes: *mut libc::c_int) -> libc::c_int;
     fn chdir(__path: *const libc::c_char) -> libc::c_int;
@@ -27,7 +39,6 @@ extern "C" {
     fn fork() -> __pid_t;
     fn open(__file: *const libc::c_char, __oflag: libc::c_int, _: ...)
      -> libc::c_int;
-    fn wait(__stat_loc: *mut libc::c_int) -> __pid_t;
 }
 pub type size_t = libc::c_ulong;
 pub type __off_t = libc::c_long;
@@ -110,105 +121,125 @@ pub struct backcmd {
     pub type_0: libc::c_int,
     pub cmd: *mut cmd,
 }
-// Execute cmd.  Never returns.
-#[no_mangle]
-pub unsafe extern "C" fn runcmd(mut cmd: *mut cmd) {
-    let mut p: [libc::c_int; 2] = [0; 2];
-    let mut bcmd: *mut backcmd = 0 as *mut backcmd;
-    let mut ecmd: *mut execcmd = 0 as *mut execcmd;
-    let mut lcmd: *mut listcmd = 0 as *mut listcmd;
-    let mut pcmd: *mut pipecmd = 0 as *mut pipecmd;
-    let mut rcmd: *mut redircmd = 0 as *mut redircmd;
-    if cmd.is_null() { exit(1 as libc::c_int); }
-    let mut current_block_43: u64;
-    match (*cmd).type_0 {
-        1 => { current_block_43 = 13474536459355229096; }
-        2 => {
-            rcmd = cmd as *mut redircmd;
-            close((*rcmd).fd);
-            if open((*rcmd).file, (*rcmd).mode) < 0 as libc::c_int {
-                dprintf(2 as libc::c_int,
-                        b"open %s failed\n\x00" as *const u8 as
-                            *const libc::c_char, (*rcmd).file);
-                exit(1 as libc::c_int);
-            }
-            runcmd((*rcmd).cmd);
-            current_block_43 = 6717214610478484138;
+
+// Lifetime is a lie, lives as long as s.
+unsafe fn make_osstr(s: *mut i8) -> &'static OsStr {
+    let len = strlen(s);
+    let bytes = std::slice::from_raw_parts(s as *mut u8, len as usize);
+    OsStr::from_bytes(bytes)
+}
+
+async unsafe fn spawn_child(argv: *mut *mut i8) -> i32 {
+    let arg0 = make_osstr(*argv);
+    let mut args = argv;
+    let mut args_iter = std::iter::from_fn(|| {
+        args = args.offset(1);
+        if (*args).is_null() {
+            None
         }
-        4 => {
-            lcmd = cmd as *mut listcmd;
-            if fork1() == 0 as libc::c_int { runcmd((*lcmd).left); }
-            wait(0 as *mut libc::c_int);
-            runcmd((*lcmd).right);
-            current_block_43 = 6717214610478484138;
+        else {
+
+            Some(make_osstr(*args))
         }
-        3 => {
-            pcmd = cmd as *mut pipecmd;
-            if pipe(p.as_mut_ptr()) < 0 as libc::c_int {
-                panic(b"pipe\x00" as *const u8 as *const libc::c_char as
-                          *mut libc::c_char);
-            }
-            if fork1() == 0 as libc::c_int {
-                close(1 as libc::c_int);
-                dup(p[1 as libc::c_int as usize]);
-                close(p[0 as libc::c_int as usize]);
-                close(p[1 as libc::c_int as usize]);
-                runcmd((*pcmd).left);
-            }
-            if fork1() == 0 as libc::c_int {
-                close(0 as libc::c_int);
-                dup(p[0 as libc::c_int as usize]);
-                close(p[0 as libc::c_int as usize]);
-                close(p[1 as libc::c_int as usize]);
-                runcmd((*pcmd).right);
-            }
-            close(p[0 as libc::c_int as usize]);
-            close(p[1 as libc::c_int as usize]);
-            wait(0 as *mut libc::c_int);
-            wait(0 as *mut libc::c_int);
-            current_block_43 = 6717214610478484138;
-        }
-        5 => {
-            bcmd = cmd as *mut backcmd;
-            if fork1() == 0 as libc::c_int { runcmd((*bcmd).cmd); }
-            current_block_43 = 6717214610478484138;
-        }
-        _ => {
-            panic(b"runcmd\x00" as *const u8 as *const libc::c_char as
-                      *mut libc::c_char);
-            current_block_43 = 13474536459355229096;
-        }
-    }
-    match current_block_43 {
-        13474536459355229096 => {
-            ecmd = cmd as *mut execcmd;
-            if (*ecmd).argv[0 as libc::c_int as usize].is_null() {
-                exit(1 as libc::c_int);
-            }
-            execv((*ecmd).argv[0 as libc::c_int as usize],
-                  (*ecmd).argv.as_mut_ptr() as *const *mut libc::c_char);
+    });
+    smol::process::Command::new(arg0)
+        .args(&mut args_iter)
+        .status()
+        .await
+        .map(|e| e.code().unwrap_or(127))
+        .unwrap_or_else(|_| {
             dprintf(2 as libc::c_int,
-                    b"exec %s failed\n\x00" as *const u8 as
-                        *const libc::c_char,
-                    (*ecmd).argv[0 as libc::c_int as usize]);
-        }
-        _ => { }
-    }
-    exit(1 as libc::c_int);
+                b"exec %s failed\n\x00" as *const u8 as
+                    *const libc::c_char,
+                arg0);
+            1
+        })
 }
-#[no_mangle]
-pub unsafe extern "C" fn getcmd(mut buf: *mut libc::c_char,
-                                mut nbuf: libc::c_int) -> libc::c_int {
-    dprintf(2 as libc::c_int, b"$ \x00" as *const u8 as *const libc::c_char);
-    memset(buf as *mut libc::c_void, 0 as libc::c_int, nbuf as libc::c_ulong);
-    fgets(buf, nbuf, stdin);
-    if *buf.offset(0 as libc::c_int as isize) as libc::c_int ==
-           0 as libc::c_int {
-        // EOF
-        return -(1 as libc::c_int)
+
+type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+impl Shell {
+    // Execute cmd.  Conceptually runs a forked shell, returns the forked shells
+    // exit status.
+    #[no_mangle]
+    pub unsafe fn runcmd(&'static self, mut cmd: *mut cmd) -> LocalBoxFuture<libc::c_int> {
+        async move {
+            let mut p: [libc::c_int; 2] = [0; 2];
+            let mut bcmd: *mut backcmd = 0 as *mut backcmd;
+            let mut ecmd: *mut execcmd = 0 as *mut execcmd;
+            let mut lcmd: *mut listcmd = 0 as *mut listcmd;
+            let mut pcmd: *mut pipecmd = 0 as *mut pipecmd;
+            let mut rcmd: *mut redircmd = 0 as *mut redircmd;
+            if cmd.is_null() { return 1 as libc::c_int; }
+            match (*cmd).type_0 {
+                1 => {
+                    ecmd = cmd as *mut execcmd;
+                    if (*ecmd).argv[0 as libc::c_int as usize].is_null() {
+                        return 1 as libc::c_int;
+                    }
+                    return spawn_child((*ecmd).argv.as_mut_ptr()).await;
+                }
+                2 => {
+                    rcmd = cmd as *mut redircmd;
+                    close((*rcmd).fd);
+                    if open((*rcmd).file, (*rcmd).mode) < 0 as libc::c_int {
+                        dprintf(2 as libc::c_int,
+                                b"open %s failed\n\x00" as *const u8 as
+                                    *const libc::c_char, (*rcmd).file);
+                        return 1 as libc::c_int;
+                    }
+                    self.runcmd((*rcmd).cmd).await;
+                }
+                4 => {
+                    lcmd = cmd as *mut listcmd;
+                    self.runcmd((*lcmd).left).await;
+                    self.runcmd((*lcmd).right).await;
+                }
+                3 => {
+                    pcmd = cmd as *mut pipecmd;
+                    if pipe(p.as_mut_ptr()) < 0 as libc::c_int {
+                        panic(b"pipe\x00" as *const u8 as *const libc::c_char as
+                                *mut libc::c_char);
+                    }
+                    let fut1 = async {
+                        close(1 as libc::c_int);
+                        dup(p[1 as libc::c_int as usize]);
+                        close(p[0 as libc::c_int as usize]);
+                        close(p[1 as libc::c_int as usize]);
+                        self.runcmd((*pcmd).left).await;
+                    };
+                    let fut2 = async {
+                        close(0 as libc::c_int);
+                        dup(p[0 as libc::c_int as usize]);
+                        close(p[0 as libc::c_int as usize]);
+                        close(p[1 as libc::c_int as usize]);
+                        self.runcmd((*pcmd).right).await;
+                    };
+                    close(p[0 as libc::c_int as usize]);
+                    close(p[1 as libc::c_int as usize]);
+                    future::zip(fut1, fut2).await;
+                }
+                5 => {
+                    bcmd = cmd as *mut backcmd;
+                    self.executor.spawn(self.runcmd((*bcmd).cmd)).detach();
+                }
+                _ => {
+                    panic(b"runcmd\x00" as *const u8 as *const libc::c_char as
+                            *mut libc::c_char);
+                }
+            }
+            return 1 as libc::c_int;
+        }.boxed_local()
     }
-    return 0 as libc::c_int;
 }
+
+// Returns false if we reached EOF. Errors if we fail to read.
+pub async fn getcmd(mut input: impl AsyncRead + Unpin, buf: &mut [u8]) -> Result<bool, io::Error> {
+    eprint!("$ " );
+    let n = input.read(buf).await?;
+    buf[n] = 0;
+    Ok(n != 0)
+}
+
 unsafe fn init() {
     let mut fd: libc::c_int = 0;
     loop
@@ -224,35 +255,36 @@ unsafe fn init() {
     }
 }
 
-async unsafe fn exec_string(buf: &mut [i8]) {
-    // Read and run input commands.
-    if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
-            buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
-            buf[2 as libc::c_int as usize] as libc::c_int == ' ' as i32 {
-        // Chdir must be called by the parent, not the child.
-        buf[strlen(buf.as_mut_ptr()).wrapping_sub(1 as libc::c_int as
-                                                        libc::c_ulong) as
-                usize] = 0 as libc::c_int as libc::c_char; // chop \n
-        if chdir(buf.as_mut_ptr().offset(3 as libc::c_int as isize)) <
-                0 as libc::c_int {
-            dprintf(2 as libc::c_int,
-                    b"cannot cd %s\n\x00" as *const u8 as
-                        *const libc::c_char,
-                    buf.as_mut_ptr().offset(3 as libc::c_int as isize));
+
+impl Shell {
+    async unsafe fn exec_string(&'static self, buf: &mut [i8]) {
+        // Read and run input commands.
+        if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
+                buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
+                buf[2 as libc::c_int as usize] as libc::c_int == ' ' as i32 {
+            // Chdir must be called by the parent, not the child.
+            buf[strlen(buf.as_mut_ptr()).wrapping_sub(1 as libc::c_int as
+                                                            libc::c_ulong) as
+                    usize] = 0 as libc::c_int as libc::c_char; // chop \n
+            if chdir(buf.as_mut_ptr().offset(3 as libc::c_int as isize)) <
+                    0 as libc::c_int {
+                dprintf(2 as libc::c_int,
+                        b"cannot cd %s\n\x00" as *const u8 as
+                            *const libc::c_char,
+                        buf.as_mut_ptr().offset(3 as libc::c_int as isize));
+            }
+        } else {
+            self.runcmd(parsecmd(buf.as_mut_ptr())).await;
         }
-    } else {
-        if fork1() == 0 as libc::c_int {
-            runcmd(parsecmd(buf.as_mut_ptr()));
-        }
-        wait(0 as *mut libc::c_int);
     }
 }
+
 // Fork but panics on failure.
 #[no_mangle]
-pub unsafe extern "C" fn panic(mut s: *mut libc::c_char) {
+pub unsafe extern "C" fn panic(mut s: *mut libc::c_char) -> libc::c_int {
     dprintf(2 as libc::c_int, b"%s\n\x00" as *const u8 as *const libc::c_char,
             s);
-    exit(1 as libc::c_int);
+    return 1 as libc::c_int;
 }
 #[no_mangle]
 pub unsafe extern "C" fn fork1() -> libc::c_int {
@@ -604,30 +636,44 @@ pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
 }
 
 /* Api */
-pub struct Shell{}
+pub struct Shell{
+    executor: LocalExecutor<'static>,
+}
 impl Shell {
     pub fn new() -> Shell {
         unsafe {
             // The only global state here being touched is fd's
             // which can be moved inside the shell later.
             init();
-            Shell{}
         }
-    }
 
-    pub async fn exec_string(&mut self, cstr: &mut [i8]) {
-        unsafe{
-            exec_string(cstr).await;
-        }
+        Shell{ executor: LocalExecutor::new() }
     }
 }
 
 #[main]
 pub fn main() {
-    let mut shell = Shell::new();
-    let mut buf = [0i8; 100];
+    let shell: &'static Shell = Box::leak(Box::new(Shell::new()));
+    let shutdown = event_listener::Event::new();
 
-    while 0 <= unsafe{ getcmd(buf.as_mut_ptr(), buf.len() as libc::c_int) } {
-        smol::block_on(shell.exec_string(&mut buf))
-    }
+    let fut = async {
+        let mut stdin = smol::Async::new(std::io::stdin()).unwrap();
+        let mut buf = [0u8; 100];
+
+        while unsafe{ getcmd(&mut stdin, &mut buf).await.unwrap() } {
+            unsafe {
+                let buf_ptr: &mut [i8; 100] = std::mem::transmute(&mut buf);
+                shell.exec_string(buf_ptr).await;
+            }
+        }
+        shutdown.notify(usize::MAX);
+    };
+
+    // Not sure why shutdown.listen() is needed to get tasks to spawn...
+    // Only reason I even realized it is that in more real executors I always
+    // have something like that anyways.
+    block_on(shell.executor.run(future::zip(
+        shutdown.listen(),
+        fut
+    )));
 }
