@@ -256,21 +256,22 @@ impl Shell {
                         buf.as_mut_ptr().offset(3 as libc::c_int as isize));
             }
         } else {
-            self.runcmd(parsecmd(buf.as_mut_ptr())).await;
+            match parsecmd(buf.as_mut_ptr()) {
+                Ok(cmd) => self.runcmd(cmd).await,
+                Err(e) => { eprintln!("{}", e); 1 },
+            };
         }
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn panic(mut s: *mut libc::c_char) -> libc::c_int {
+pub unsafe fn panic(mut s: *mut libc::c_char) -> libc::c_int {
     dprintf(2 as libc::c_int, b"%s\n\x00" as *const u8 as *const libc::c_char,
             s);
     return 1 as libc::c_int;
 }
 //PAGEBREAK!
 // Constructors
-#[no_mangle]
-pub unsafe extern "C" fn execcmd() -> *mut cmd {
+pub unsafe fn execcmd() -> *mut cmd {
     let mut cmd: *mut execcmd = 0 as *mut execcmd;
     cmd =
         malloc(::std::mem::size_of::<execcmd>() as libc::c_ulong) as
@@ -280,8 +281,7 @@ pub unsafe extern "C" fn execcmd() -> *mut cmd {
     (*cmd).type_0 = CommandType::Exec;
     return cmd as *mut cmd;
 }
-#[no_mangle]
-pub unsafe extern "C" fn redircmd(mut subcmd: *mut cmd,
+pub unsafe fn redircmd(mut subcmd: *mut cmd,
                                   mut file: *mut libc::c_char,
                                   mut efile: *mut libc::c_char,
                                   mut mode: libc::c_int, mut fd: libc::c_int)
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn redircmd(mut subcmd: *mut cmd,
     return cmd as *mut cmd;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pipecmd(mut left: *mut cmd, mut right: *mut cmd)
+pub unsafe fn pipecmd(mut left: *mut cmd, mut right: *mut cmd)
  -> *mut cmd {
     let mut cmd: *mut pipecmd = 0 as *mut pipecmd;
     cmd =
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn pipecmd(mut left: *mut cmd, mut right: *mut cmd)
     return cmd as *mut cmd;
 }
 #[no_mangle]
-pub unsafe extern "C" fn listcmd(mut left: *mut cmd, mut right: *mut cmd)
+pub unsafe fn listcmd(mut left: *mut cmd, mut right: *mut cmd)
  -> *mut cmd {
     let mut cmd: *mut listcmd = 0 as *mut listcmd;
     cmd =
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn listcmd(mut left: *mut cmd, mut right: *mut cmd)
     return cmd as *mut cmd;
 }
 #[no_mangle]
-pub unsafe extern "C" fn backcmd(mut subcmd: *mut cmd) -> *mut cmd {
+pub unsafe fn backcmd(mut subcmd: *mut cmd) -> *mut cmd {
     let mut cmd: *mut backcmd = 0 as *mut backcmd;
     cmd =
         malloc(::std::mem::size_of::<backcmd>() as libc::c_ulong) as
@@ -354,7 +354,7 @@ pub static mut symbols: [libc::c_char; 8] =
         *::std::mem::transmute::<&[u8; 8], &[libc::c_char; 8]>(b"<|>&;()\x00")
     };
 #[no_mangle]
-pub unsafe extern "C" fn gettoken(mut ps: *mut *mut libc::c_char,
+pub unsafe fn gettoken(mut ps: *mut *mut libc::c_char,
                                   mut es: *mut libc::c_char,
                                   mut q: *mut *mut libc::c_char,
                                   mut eq: *mut *mut libc::c_char)
@@ -397,7 +397,7 @@ pub unsafe extern "C" fn gettoken(mut ps: *mut *mut libc::c_char,
     return ret;
 }
 #[no_mangle]
-pub unsafe extern "C" fn peek(mut ps: *mut *mut libc::c_char,
+pub unsafe fn peek(mut ps: *mut *mut libc::c_char,
                               mut es: *mut libc::c_char,
                               mut toks: *mut libc::c_char) -> libc::c_int {
     let mut s: *mut libc::c_char = 0 as *mut libc::c_char;
@@ -411,28 +411,27 @@ pub unsafe extern "C" fn peek(mut ps: *mut *mut libc::c_char,
                 !strchr(toks, *s as libc::c_int).is_null()) as libc::c_int;
 }
 #[no_mangle]
-pub unsafe extern "C" fn parsecmd(mut s: *mut libc::c_char) -> *mut cmd {
+pub unsafe fn parsecmd(mut s: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut es: *mut libc::c_char = 0 as *mut libc::c_char;
     let mut cmd: *mut cmd = 0 as *mut cmd;
     es = s.offset(strlen(s) as isize);
-    cmd = parseline(&mut s, es);
+    cmd = parseline(&mut s, es)?;
     peek(&mut s, es,
          b"\x00" as *const u8 as *const libc::c_char as *mut libc::c_char);
     if s != es {
         dprintf(2 as libc::c_int,
                 b"leftovers: %s\n\x00" as *const u8 as *const libc::c_char,
                 s);
-        panic(b"syntax\x00" as *const u8 as *const libc::c_char as
-                  *mut libc::c_char);
+        return Err("syntax");
     }
     nulterminate(cmd);
-    return cmd;
+    return Ok(cmd);
 }
 #[no_mangle]
-pub unsafe extern "C" fn parseline(mut ps: *mut *mut libc::c_char,
-                                   mut es: *mut libc::c_char) -> *mut cmd {
+pub unsafe fn parseline(mut ps: *mut *mut libc::c_char,
+                                   mut es: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut cmd: *mut cmd = 0 as *mut cmd;
-    cmd = parsepipe(ps, es);
+    cmd = parsepipe(ps, es)?;
     while peek(ps, es,
                b"&\x00" as *const u8 as *const libc::c_char as
                    *mut libc::c_char) != 0 {
@@ -445,28 +444,28 @@ pub unsafe extern "C" fn parseline(mut ps: *mut *mut libc::c_char,
            != 0 {
         gettoken(ps, es, 0 as *mut *mut libc::c_char,
                  0 as *mut *mut libc::c_char);
-        cmd = listcmd(cmd, parseline(ps, es))
+        cmd = listcmd(cmd, parseline(ps, es)?)
     }
-    return cmd;
+    return Ok(cmd);
 }
 #[no_mangle]
-pub unsafe extern "C" fn parsepipe(mut ps: *mut *mut libc::c_char,
-                                   mut es: *mut libc::c_char) -> *mut cmd {
+pub unsafe fn parsepipe(mut ps: *mut *mut libc::c_char,
+                                   mut es: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut cmd: *mut cmd = 0 as *mut cmd;
-    cmd = parseexec(ps, es);
+    cmd = parseexec(ps, es)?;
     if peek(ps, es,
             b"|\x00" as *const u8 as *const libc::c_char as *mut libc::c_char)
            != 0 {
         gettoken(ps, es, 0 as *mut *mut libc::c_char,
                  0 as *mut *mut libc::c_char);
-        cmd = pipecmd(cmd, parsepipe(ps, es))
+        cmd = pipecmd(cmd, parsepipe(ps, es)?)
     }
-    return cmd;
+    return Ok(cmd);
 }
 #[no_mangle]
-pub unsafe extern "C" fn parseredirs(mut cmd: *mut cmd,
+pub unsafe fn parseredirs(mut cmd: *mut cmd,
                                      mut ps: *mut *mut libc::c_char,
-                                     mut es: *mut libc::c_char) -> *mut cmd {
+                                     mut es: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut tok: libc::c_int = 0;
     let mut q: *mut libc::c_char = 0 as *mut libc::c_char;
     let mut eq: *mut libc::c_char = 0 as *mut libc::c_char;
@@ -477,8 +476,7 @@ pub unsafe extern "C" fn parseredirs(mut cmd: *mut cmd,
             gettoken(ps, es, 0 as *mut *mut libc::c_char,
                      0 as *mut *mut libc::c_char);
         if gettoken(ps, es, &mut q, &mut eq) != 'a' as i32 {
-            panic(b"missing file for redirection\x00" as *const u8 as
-                      *const libc::c_char as *mut libc::c_char);
+            return Err("missing file for redirection");
         }
         match tok {
             60 => {
@@ -500,35 +498,33 @@ pub unsafe extern "C" fn parseredirs(mut cmd: *mut cmd,
             _ => { }
         }
     }
-    return cmd;
+    return Ok(cmd);
 }
 #[no_mangle]
-pub unsafe extern "C" fn parseblock(mut ps: *mut *mut libc::c_char,
-                                    mut es: *mut libc::c_char) -> *mut cmd {
+pub unsafe fn parseblock(mut ps: *mut *mut libc::c_char,
+                                    mut es: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut cmd: *mut cmd = 0 as *mut cmd;
     if peek(ps, es,
             b"(\x00" as *const u8 as *const libc::c_char as *mut libc::c_char)
            == 0 {
-        panic(b"parseblock\x00" as *const u8 as *const libc::c_char as
-                  *mut libc::c_char);
+        return Err("parseblock");
     }
     gettoken(ps, es, 0 as *mut *mut libc::c_char,
              0 as *mut *mut libc::c_char);
-    cmd = parseline(ps, es);
+    cmd = parseline(ps, es)?;
     if peek(ps, es,
             b")\x00" as *const u8 as *const libc::c_char as *mut libc::c_char)
            == 0 {
-        panic(b"syntax - missing )\x00" as *const u8 as *const libc::c_char as
-                  *mut libc::c_char);
+        return Err("syntax - missing )");
     }
     gettoken(ps, es, 0 as *mut *mut libc::c_char,
              0 as *mut *mut libc::c_char);
-    cmd = parseredirs(cmd, ps, es);
-    return cmd;
+    cmd = parseredirs(cmd, ps, es)?;
+    return Ok(cmd);
 }
 #[no_mangle]
-pub unsafe extern "C" fn parseexec(mut ps: *mut *mut libc::c_char,
-                                   mut es: *mut libc::c_char) -> *mut cmd {
+pub unsafe fn parseexec(mut ps: *mut *mut libc::c_char,
+                                   mut es: *mut libc::c_char) -> Result<*mut cmd, &'static str> {
     let mut q: *mut libc::c_char = 0 as *mut libc::c_char;
     let mut eq: *mut libc::c_char = 0 as *mut libc::c_char;
     let mut tok: libc::c_int = 0;
@@ -543,32 +539,30 @@ pub unsafe extern "C" fn parseexec(mut ps: *mut *mut libc::c_char,
     ret = execcmd();
     cmd = ret as *mut execcmd;
     argc = 0 as libc::c_int;
-    ret = parseredirs(ret, ps, es);
+    ret = parseredirs(ret, ps, es)?;
     while peek(ps, es,
                b"|)&;\x00" as *const u8 as *const libc::c_char as
                    *mut libc::c_char) == 0 {
         tok = gettoken(ps, es, &mut q, &mut eq);
         if tok == 0 as libc::c_int { break ; }
         if tok != 'a' as i32 {
-            panic(b"syntax\x00" as *const u8 as *const libc::c_char as
-                      *mut libc::c_char);
+            return Err("syntax");
         }
         (*cmd).argv[argc as usize] = q;
         (*cmd).eargv[argc as usize] = eq;
         argc += 1;
         if argc >= 10 as libc::c_int {
-            panic(b"too many args\x00" as *const u8 as *const libc::c_char as
-                      *mut libc::c_char);
+            return Err("too many args");
         }
-        ret = parseredirs(ret, ps, es)
+        ret = parseredirs(ret, ps, es)?
     }
     (*cmd).argv[argc as usize] = 0 as *mut libc::c_char;
     (*cmd).eargv[argc as usize] = 0 as *mut libc::c_char;
-    return ret;
+    return Ok(ret);
 }
 // NUL-terminate all the counted strings.
 #[no_mangle]
-pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
+pub unsafe fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
     let mut i: libc::c_int = 0;
     let mut bcmd: *mut backcmd = 0 as *mut backcmd;
     let mut ecmd: *mut execcmd = 0 as *mut execcmd;
