@@ -1,0 +1,1 @@
+[{ "directory": "/home/greg/p/other/async-transpiled-xv6-shell", "file": "sh.c", "output": "/tmp/sh-84c42f.o", "arguments": ["/usr/bin/clang-11", "-xc", "sh.c", "-o", "sh", "--target=x86_64-unknown-linux-gnu"]}]
