@@ -5,17 +5,28 @@
            register_tool)]
 
 use std::{
+    collections::HashMap,
     io,
     ffi::OsStr,
-    os::unix::ffi::OsStrExt,
-    pin::Pin
+    mem::forget,
+    os::unix::{
+        ffi::OsStrExt,
+        io::FromRawFd,
+    },
+    pin::Pin,
+    rc::Rc,
 };
 use smol::{
     block_on,
     LocalExecutor,
+    fs::File,
     future::{self, Future, FutureExt},
     prelude::*,
 };
+
+mod spawn;
+
+type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -43,10 +54,6 @@ extern "C" {
     fn close(__fd: libc::c_int) -> libc::c_int;
     fn pipe(__pipedes: *mut libc::c_int) -> libc::c_int;
     fn chdir(__path: *const libc::c_char) -> libc::c_int;
-    fn dup(__fd: libc::c_int) -> libc::c_int;
-    fn execv(__path: *const libc::c_char, __argv: *const *mut libc::c_char)
-     -> libc::c_int;
-    fn fork() -> __pid_t;
     fn open(__file: *const libc::c_char, __oflag: libc::c_int, _: ...)
      -> libc::c_int;
 }
@@ -139,102 +146,87 @@ unsafe fn make_osstr(s: *mut i8) -> &'static OsStr {
     OsStr::from_bytes(bytes)
 }
 
-async unsafe fn spawn_child(argv: *mut *mut i8) -> i32 {
-    let arg0 = make_osstr(*argv);
-    let mut args = argv;
-    let mut args_iter = std::iter::from_fn(|| {
-        args = args.offset(1);
-        if (*args).is_null() {
-            None
-        }
-        else {
-
-            Some(make_osstr(*args))
-        }
-    });
-    smol::process::Command::new(arg0)
-        .args(&mut args_iter)
-        .status()
-        .await
-        .map(|e| e.code().unwrap_or(127))
-        .unwrap_or_else(|_| {
-            dprintf(2 as libc::c_int,
-                b"exec %s failed\n\x00" as *const u8 as
-                    *const libc::c_char,
-                arg0);
-            1
-        })
+fn ready<T: 'static>(t: T) -> LocalBoxFuture<'static, T> {
+    smol::future::ready(t).boxed_local()
 }
 
-type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 impl Shell {
     // Execute cmd.  Conceptually runs a forked shell, returns the forked shells
     // exit status.
-    #[no_mangle]
-    pub unsafe fn runcmd(&'static self, mut cmd: *mut cmd) -> LocalBoxFuture<libc::c_int> {
-        async move {
-            let mut p: [libc::c_int; 2] = [0; 2];
-            let mut bcmd: *mut backcmd = 0 as *mut backcmd;
-            let mut ecmd: *mut execcmd = 0 as *mut execcmd;
-            let mut lcmd: *mut listcmd = 0 as *mut listcmd;
-            let mut pcmd: *mut pipecmd = 0 as *mut pipecmd;
-            let mut rcmd: *mut redircmd = 0 as *mut redircmd;
-            if cmd.is_null() { return 1 as libc::c_int; }
-            match (*cmd).type_0 {
-                CommandType::Exec => {
-                    ecmd = cmd as *mut execcmd;
-                    if (*ecmd).argv[0 as libc::c_int as usize].is_null() {
-                        return 1 as libc::c_int;
-                    }
-                    return spawn_child((*ecmd).argv.as_mut_ptr()).await;
+    pub unsafe fn runcmd(&self, mut cmd: *mut cmd) -> LocalBoxFuture<'static, libc::c_int> {
+        let mut p: [libc::c_int; 2] = [0; 2];
+        let mut bcmd: *mut backcmd = 0 as *mut backcmd;
+        let mut ecmd: *mut execcmd = 0 as *mut execcmd;
+        let mut lcmd: *mut listcmd = 0 as *mut listcmd;
+        let mut pcmd: *mut pipecmd = 0 as *mut pipecmd;
+        let mut rcmd: *mut redircmd = 0 as *mut redircmd;
+        if cmd.is_null() { return ready(1) }
+        match (*cmd).type_0 {
+            CommandType::Exec => {
+                ecmd = cmd as *mut execcmd;
+                if (*ecmd).argv[0 as libc::c_int as usize].is_null() {
+                    return ready(1);
                 }
-                CommandType::Redir => {
-                    rcmd = cmd as *mut redircmd;
-                    close((*rcmd).fd);
-                    if open((*rcmd).file, (*rcmd).mode) < 0 as libc::c_int {
-                        dprintf(2 as libc::c_int,
-                                b"open %s failed\n\x00" as *const u8 as
-                                    *const libc::c_char, (*rcmd).file);
-                        return 1 as libc::c_int;
-                    }
-                    self.runcmd((*rcmd).cmd).await;
-                }
-                CommandType::List => {
-                    lcmd = cmd as *mut listcmd;
-                    self.runcmd((*lcmd).left).await;
-                    self.runcmd((*lcmd).right).await;
-                }
-                CommandType::Pipe => {
-                    pcmd = cmd as *mut pipecmd;
-                    if pipe(p.as_mut_ptr()) < 0 as libc::c_int {
-                        panic(b"pipe\x00" as *const u8 as *const libc::c_char as
-                                *mut libc::c_char);
-                    }
-                    let fut1 = async {
-                        close(1 as libc::c_int);
-                        dup(p[1 as libc::c_int as usize]);
-                        close(p[0 as libc::c_int as usize]);
-                        close(p[1 as libc::c_int as usize]);
-                        self.runcmd((*pcmd).left).await;
-                    };
-                    let fut2 = async {
-                        close(0 as libc::c_int);
-                        dup(p[0 as libc::c_int as usize]);
-                        close(p[0 as libc::c_int as usize]);
-                        close(p[1 as libc::c_int as usize]);
-                        self.runcmd((*pcmd).right).await;
-                    };
-                    close(p[0 as libc::c_int as usize]);
-                    close(p[1 as libc::c_int as usize]);
-                    future::zip(fut1, fut2).await;
-                }
-                CommandType::Back  => {
-                    bcmd = cmd as *mut backcmd;
-                    self.executor.spawn(self.runcmd((*bcmd).cmd)).detach();
+                match spawn::spawn((*ecmd).argv.as_ptr() as *const *const i8, &self.fds) {
+                    Ok(fut) => fut.boxed_local(),
+                    Err(e) => ready(e as libc::c_int),
                 }
             }
-            return 1 as libc::c_int;
-        }.boxed_local()
+            CommandType::Redir => {
+                rcmd = cmd as *mut redircmd;
+                let new_fd = open((*rcmd).file, (*rcmd).mode);
+                if new_fd < 0 {
+                    dprintf(2 as libc::c_int,
+                            b"open %s failed\n\x00" as *const u8 as
+                                *const libc::c_char, (*rcmd).file);
+                    return ready(1);
+                }
+                let mut this = self.clone();
+                // In most cases including this we could avoid the extraneous clone
+                // by saving and restoring the old fd from the stack.
+                // Let's not worry about that yet.
+                this.fds.insert((*rcmd).fd, Rc::new(File::from_raw_fd(new_fd)));
+                this.runcmd((*rcmd).cmd).boxed_local()
+            }
+            CommandType::List => {
+                lcmd = cmd as *mut listcmd;
+                let this = self.clone();
+                async move {
+                    this.runcmd((*lcmd).left).await;
+                    this.runcmd((*lcmd).right).await
+                }.boxed_local()
+            }
+            CommandType::Pipe => {
+                pcmd = cmd as *mut pipecmd;
+                if pipe(p.as_mut_ptr()) < 0 as libc::c_int {
+                    panic(b"pipe\x00" as *const u8 as *const libc::c_char as
+                            *mut libc::c_char);
+                }
+                let mut this1 = self.clone();
+                let fut1 = async move {
+                    this1.fds.insert(1, Rc::new(File::from_raw_fd(p[1])));
+                    let proc = this1.runcmd((*pcmd).left);
+                    // Need to get rid of this1 since it contains the pipe fd.
+                    drop(this1);
+                    proc.await
+                };
+                let mut this2 = self.clone();
+                let fut2 = async move {
+                    this2.fds.insert(0, Rc::new(File::from_raw_fd(p[0])));
+                    this2.runcmd((*pcmd).right).await
+                };
+                // What half should this return as anyways? Whatever, first half for now.
+                async move { future::zip(fut1, fut2).await.0 }.boxed_local()
+            }
+            CommandType::Back => {
+                bcmd = cmd as *mut backcmd;
+                let this = self.clone();
+                self.executor.spawn( async move {
+                    this.runcmd((*bcmd).cmd).await
+                }).detach();
+                ready(0)
+            }
+        }
     }
 }
 
@@ -246,24 +238,8 @@ pub async fn getcmd(mut input: impl AsyncRead + Unpin, buf: &mut [u8]) -> Result
     Ok(n != 0)
 }
 
-unsafe fn init() {
-    let mut fd: libc::c_int = 0;
-    loop
-         // Ensure that three file descriptors are open.
-         {
-        fd =
-            open(b"console\x00" as *const u8 as *const libc::c_char,
-                 0o2 as libc::c_int);
-        if !(fd >= 0 as libc::c_int) { break ; }
-        if !(fd >= 3 as libc::c_int) { continue ; }
-        close(fd);
-        break ;
-    }
-}
-
-
 impl Shell {
-    async unsafe fn exec_string(&'static self, buf: &mut [i8]) {
+    async unsafe fn exec_string(&self, buf: &mut [i8]) {
         // Read and run input commands.
         if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
                 buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
@@ -285,22 +261,11 @@ impl Shell {
     }
 }
 
-// Fork but panics on failure.
 #[no_mangle]
 pub unsafe extern "C" fn panic(mut s: *mut libc::c_char) -> libc::c_int {
     dprintf(2 as libc::c_int, b"%s\n\x00" as *const u8 as *const libc::c_char,
             s);
     return 1 as libc::c_int;
-}
-#[no_mangle]
-pub unsafe extern "C" fn fork1() -> libc::c_int {
-    let mut pid: libc::c_int = 0;
-    pid = fork();
-    if pid == -(1 as libc::c_int) {
-        panic(b"fork\x00" as *const u8 as *const libc::c_char as
-                  *mut libc::c_char);
-    }
-    return pid;
 }
 //PAGEBREAK!
 // Constructors
@@ -641,31 +606,62 @@ pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
 }
 
 /* Api */
+#[derive(Clone)]
 pub struct Shell{
-    executor: LocalExecutor<'static>,
+    executor: &'static LocalExecutor<'static>,
+    // Should really use a VecMap or something more efficient...
+    // Ideally inline the first 3 or 4 fds instead of always heap allocating...
+    fds: HashMap<i32, Rc<File>>,
 }
+
 impl Shell {
     pub fn new() -> Shell {
+        let mut fds = HashMap::with_capacity(3);
         unsafe {
-            // The only global state here being touched is fd's
-            // which can be moved inside the shell later.
-            init();
+            let mut fd: libc::c_int = 0;
+            loop
+                // Ensure that three file descriptors are open.
+                {
+                fd =
+                    open(b"console\x00" as *const u8 as *const libc::c_char,
+                        0o2 as libc::c_int);
+                if !(fd >= 0 as libc::c_int) { break ; }
+                if !(fd >= 3 as libc::c_int) { continue ; }
+                close(fd);
+                break ;
+            }
+
+            let stdin_rc = Rc::new(File::from_raw_fd(0));
+            let stdout_rc = Rc::new(File::from_raw_fd(1));
+            let stderr_rc = Rc::new(File::from_raw_fd(2));
+
+            fds.insert(0, stdin_rc.clone());
+            fds.insert(1, stdout_rc.clone());
+            fds.insert(2, stderr_rc.clone());
+
+            // Forget the original rc's so that we never drop stdin/out/err.
+            forget(stdin_rc);
+            forget(stdout_rc);
+            forget(stderr_rc);
         }
 
-        Shell{ executor: LocalExecutor::new() }
+        Shell{
+            executor: Box::leak(Box::new(LocalExecutor::new())),
+            fds,
+        }
     }
 }
 
 #[main]
 pub fn main() {
-    let shell: &'static Shell = Box::leak(Box::new(Shell::new()));
+    let shell: Shell = Shell::new();
     let shutdown = event_listener::Event::new();
 
     let fut = async {
         let mut stdin = smol::Async::new(std::io::stdin()).unwrap();
         let mut buf = [0u8; 100];
 
-        while unsafe{ getcmd(&mut stdin, &mut buf).await.unwrap() } {
+        while getcmd(&mut stdin, &mut buf).await.unwrap() {
             unsafe {
                 let buf_ptr: &mut [i8; 100] = std::mem::transmute(&mut buf);
                 shell.exec_string(buf_ptr).await;
