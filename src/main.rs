@@ -17,6 +17,16 @@ use smol::{
     prelude::*,
 };
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub enum CommandType {
+    Exec  = 1,
+    Redir = 2,
+    Pipe  = 3,
+    List  = 4,
+    Back  = 5,
+}
+
 extern "C" {
     pub type _IO_wide_data;
     pub type _IO_codecvt;
@@ -82,19 +92,19 @@ pub type FILE = _IO_FILE;
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct cmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct execcmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
     pub argv: [*mut libc::c_char; 10],
     pub eargv: [*mut libc::c_char; 10],
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct redircmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
     pub cmd: *mut cmd,
     pub file: *mut libc::c_char,
     pub efile: *mut libc::c_char,
@@ -104,21 +114,21 @@ pub struct redircmd {
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct pipecmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
     pub left: *mut cmd,
     pub right: *mut cmd,
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct listcmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
     pub left: *mut cmd,
     pub right: *mut cmd,
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct backcmd {
-    pub type_0: libc::c_int,
+    pub type_0: CommandType,
     pub cmd: *mut cmd,
 }
 
@@ -171,14 +181,14 @@ impl Shell {
             let mut rcmd: *mut redircmd = 0 as *mut redircmd;
             if cmd.is_null() { return 1 as libc::c_int; }
             match (*cmd).type_0 {
-                1 => {
+                CommandType::Exec => {
                     ecmd = cmd as *mut execcmd;
                     if (*ecmd).argv[0 as libc::c_int as usize].is_null() {
                         return 1 as libc::c_int;
                     }
                     return spawn_child((*ecmd).argv.as_mut_ptr()).await;
                 }
-                2 => {
+                CommandType::Redir => {
                     rcmd = cmd as *mut redircmd;
                     close((*rcmd).fd);
                     if open((*rcmd).file, (*rcmd).mode) < 0 as libc::c_int {
@@ -189,12 +199,12 @@ impl Shell {
                     }
                     self.runcmd((*rcmd).cmd).await;
                 }
-                4 => {
+                CommandType::List => {
                     lcmd = cmd as *mut listcmd;
                     self.runcmd((*lcmd).left).await;
                     self.runcmd((*lcmd).right).await;
                 }
-                3 => {
+                CommandType::Pipe => {
                     pcmd = cmd as *mut pipecmd;
                     if pipe(p.as_mut_ptr()) < 0 as libc::c_int {
                         panic(b"pipe\x00" as *const u8 as *const libc::c_char as
@@ -218,13 +228,9 @@ impl Shell {
                     close(p[1 as libc::c_int as usize]);
                     future::zip(fut1, fut2).await;
                 }
-                5 => {
+                CommandType::Back  => {
                     bcmd = cmd as *mut backcmd;
                     self.executor.spawn(self.runcmd((*bcmd).cmd)).detach();
-                }
-                _ => {
-                    panic(b"runcmd\x00" as *const u8 as *const libc::c_char as
-                            *mut libc::c_char);
                 }
             }
             return 1 as libc::c_int;
@@ -306,7 +312,7 @@ pub unsafe extern "C" fn execcmd() -> *mut cmd {
             *mut execcmd;
     memset(cmd as *mut libc::c_void, 0 as libc::c_int,
            ::std::mem::size_of::<execcmd>() as libc::c_ulong);
-    (*cmd).type_0 = 1 as libc::c_int;
+    (*cmd).type_0 = CommandType::Exec;
     return cmd as *mut cmd;
 }
 #[no_mangle]
@@ -321,7 +327,7 @@ pub unsafe extern "C" fn redircmd(mut subcmd: *mut cmd,
             *mut redircmd;
     memset(cmd as *mut libc::c_void, 0 as libc::c_int,
            ::std::mem::size_of::<redircmd>() as libc::c_ulong);
-    (*cmd).type_0 = 2 as libc::c_int;
+    (*cmd).type_0 = CommandType::Redir;
     (*cmd).cmd = subcmd;
     (*cmd).file = file;
     (*cmd).efile = efile;
@@ -338,7 +344,7 @@ pub unsafe extern "C" fn pipecmd(mut left: *mut cmd, mut right: *mut cmd)
             *mut pipecmd;
     memset(cmd as *mut libc::c_void, 0 as libc::c_int,
            ::std::mem::size_of::<pipecmd>() as libc::c_ulong);
-    (*cmd).type_0 = 3 as libc::c_int;
+    (*cmd).type_0 = CommandType::Pipe;
     (*cmd).left = left;
     (*cmd).right = right;
     return cmd as *mut cmd;
@@ -352,7 +358,7 @@ pub unsafe extern "C" fn listcmd(mut left: *mut cmd, mut right: *mut cmd)
             *mut listcmd;
     memset(cmd as *mut libc::c_void, 0 as libc::c_int,
            ::std::mem::size_of::<listcmd>() as libc::c_ulong);
-    (*cmd).type_0 = 4 as libc::c_int;
+    (*cmd).type_0 = CommandType::List;
     (*cmd).left = left;
     (*cmd).right = right;
     return cmd as *mut cmd;
@@ -365,7 +371,7 @@ pub unsafe extern "C" fn backcmd(mut subcmd: *mut cmd) -> *mut cmd {
             *mut backcmd;
     memset(cmd as *mut libc::c_void, 0 as libc::c_int,
            ::std::mem::size_of::<backcmd>() as libc::c_ulong);
-    (*cmd).type_0 = 5 as libc::c_int;
+    (*cmd).type_0 = CommandType::Back;
     (*cmd).cmd = subcmd;
     return cmd as *mut cmd;
 }
@@ -606,7 +612,7 @@ pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
     let mut rcmd: *mut redircmd = 0 as *mut redircmd;
     if cmd.is_null() { return 0 as *mut cmd }
     match (*cmd).type_0 {
-        1 => {
+        CommandType::Exec => {
             ecmd = cmd as *mut execcmd;
             i = 0 as libc::c_int;
             while !(*ecmd).argv[i as usize].is_null() {
@@ -614,23 +620,22 @@ pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
                 i += 1
             }
         }
-        2 => {
+        CommandType::Redir => {
             rcmd = cmd as *mut redircmd;
             nulterminate((*rcmd).cmd);
             *(*rcmd).efile = 0 as libc::c_int as libc::c_char
         }
-        3 => {
+        CommandType::Pipe => {
             pcmd = cmd as *mut pipecmd;
             nulterminate((*pcmd).left);
             nulterminate((*pcmd).right);
         }
-        4 => {
+        CommandType::List => {
             lcmd = cmd as *mut listcmd;
             nulterminate((*lcmd).left);
             nulterminate((*lcmd).right);
         }
-        5 => { bcmd = cmd as *mut backcmd; nulterminate((*bcmd).cmd); }
-        _ => { }
+        CommandType::Back => { bcmd = cmd as *mut backcmd; nulterminate((*bcmd).cmd); }
     }
     return cmd;
 }
