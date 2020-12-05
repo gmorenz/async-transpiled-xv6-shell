@@ -1,48 +1,32 @@
 #![allow(dead_code, mutable_transmutes, non_camel_case_types, non_snake_case,
          non_upper_case_globals, unused_assignments, unused_mut)]
 #![register_tool(c2rust)]
-#![feature(const_raw_ptr_to_usize_cast, const_transmute, extern_types, main,
+#![feature(const_raw_ptr_to_usize_cast, extern_types, main,
            register_tool)]
 extern "C" {
     pub type _IO_wide_data;
     pub type _IO_codecvt;
     pub type _IO_marker;
-    #[no_mangle]
     static mut stdin: *mut FILE;
-    #[no_mangle]
     fn dprintf(__fd: libc::c_int, __fmt: *const libc::c_char, _: ...)
      -> libc::c_int;
-    #[no_mangle]
     fn fgets(__s: *mut libc::c_char, __n: libc::c_int, __stream: *mut FILE)
      -> *mut libc::c_char;
-    #[no_mangle]
     fn memset(_: *mut libc::c_void, _: libc::c_int, _: libc::c_ulong)
      -> *mut libc::c_void;
-    #[no_mangle]
     fn strchr(_: *const libc::c_char, _: libc::c_int) -> *mut libc::c_char;
-    #[no_mangle]
     fn strlen(_: *const libc::c_char) -> libc::c_ulong;
-    #[no_mangle]
     fn malloc(_: libc::c_ulong) -> *mut libc::c_void;
-    #[no_mangle]
     fn exit(_: libc::c_int) -> !;
-    #[no_mangle]
     fn close(__fd: libc::c_int) -> libc::c_int;
-    #[no_mangle]
     fn pipe(__pipedes: *mut libc::c_int) -> libc::c_int;
-    #[no_mangle]
     fn chdir(__path: *const libc::c_char) -> libc::c_int;
-    #[no_mangle]
     fn dup(__fd: libc::c_int) -> libc::c_int;
-    #[no_mangle]
     fn execv(__path: *const libc::c_char, __argv: *const *mut libc::c_char)
      -> libc::c_int;
-    #[no_mangle]
     fn fork() -> __pid_t;
-    #[no_mangle]
     fn open(__file: *const libc::c_char, __oflag: libc::c_int, _: ...)
      -> libc::c_int;
-    #[no_mangle]
     fn wait(__stat_loc: *mut libc::c_int) -> __pid_t;
 }
 pub type size_t = libc::c_ulong;
@@ -240,7 +224,7 @@ unsafe fn init() {
     }
 }
 
-unsafe fn exec_string(buf: &mut [i8]) {
+async unsafe fn exec_string(buf: &mut [i8]) {
     // Read and run input commands.
     if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
             buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
@@ -631,9 +615,9 @@ impl Shell {
         }
     }
 
-    pub fn exec_string(&mut self, cstr: &mut [i8]) {
+    pub async fn exec_string(&mut self, cstr: &mut [i8]) {
         unsafe{
-            exec_string(cstr)
+            exec_string(cstr).await;
         }
     }
 }
@@ -644,6 +628,6 @@ pub fn main() {
     let mut buf = [0i8; 100];
 
     while 0 <= unsafe{ getcmd(buf.as_mut_ptr(), buf.len() as libc::c_int) } {
-        shell.exec_string(&mut buf)
+        smol::block_on(shell.exec_string(&mut buf))
     }
 }
