@@ -225,10 +225,9 @@ pub unsafe extern "C" fn getcmd(mut buf: *mut libc::c_char,
     }
     return 0 as libc::c_int;
 }
-unsafe fn main_0() -> libc::c_int {
-    let mut buf: [libc::c_char; 100] = [0; 100];
+unsafe fn init() {
     let mut fd: libc::c_int = 0;
-    loop 
+    loop
          // Ensure that three file descriptors are open.
          {
         fd =
@@ -239,32 +238,30 @@ unsafe fn main_0() -> libc::c_int {
         close(fd);
         break ;
     }
+}
+
+unsafe fn exec_string(buf: &mut [i8]) {
     // Read and run input commands.
-    while getcmd(buf.as_mut_ptr(),
-                 ::std::mem::size_of::<[libc::c_char; 100]>() as libc::c_ulong
-                     as libc::c_int) >= 0 as libc::c_int {
-        if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
-               buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
-               buf[2 as libc::c_int as usize] as libc::c_int == ' ' as i32 {
-            // Chdir must be called by the parent, not the child.
-            buf[strlen(buf.as_mut_ptr()).wrapping_sub(1 as libc::c_int as
-                                                          libc::c_ulong) as
-                    usize] = 0 as libc::c_int as libc::c_char; // chop \n
-            if chdir(buf.as_mut_ptr().offset(3 as libc::c_int as isize)) <
-                   0 as libc::c_int {
-                dprintf(2 as libc::c_int,
-                        b"cannot cd %s\n\x00" as *const u8 as
-                            *const libc::c_char,
-                        buf.as_mut_ptr().offset(3 as libc::c_int as isize));
-            }
-        } else {
-            if fork1() == 0 as libc::c_int {
-                runcmd(parsecmd(buf.as_mut_ptr()));
-            }
-            wait(0 as *mut libc::c_int);
+    if buf[0 as libc::c_int as usize] as libc::c_int == 'c' as i32 &&
+            buf[1 as libc::c_int as usize] as libc::c_int == 'd' as i32 &&
+            buf[2 as libc::c_int as usize] as libc::c_int == ' ' as i32 {
+        // Chdir must be called by the parent, not the child.
+        buf[strlen(buf.as_mut_ptr()).wrapping_sub(1 as libc::c_int as
+                                                        libc::c_ulong) as
+                usize] = 0 as libc::c_int as libc::c_char; // chop \n
+        if chdir(buf.as_mut_ptr().offset(3 as libc::c_int as isize)) <
+                0 as libc::c_int {
+            dprintf(2 as libc::c_int,
+                    b"cannot cd %s\n\x00" as *const u8 as
+                        *const libc::c_char,
+                    buf.as_mut_ptr().offset(3 as libc::c_int as isize));
         }
+    } else {
+        if fork1() == 0 as libc::c_int {
+            runcmd(parsecmd(buf.as_mut_ptr()));
+        }
+        wait(0 as *mut libc::c_int);
     }
-    exit(1 as libc::c_int);
 }
 // Fork but panics on failure.
 #[no_mangle]
@@ -621,5 +618,32 @@ pub unsafe extern "C" fn nulterminate(mut cmd: *mut cmd) -> *mut cmd {
     }
     return cmd;
 }
+
+/* Api */
+pub struct Shell{}
+impl Shell {
+    pub fn new() -> Shell {
+        unsafe {
+            // The only global state here being touched is fd's
+            // which can be moved inside the shell later.
+            init();
+            Shell{}
+        }
+    }
+
+    pub fn exec_string(&mut self, cstr: &mut [i8]) {
+        unsafe{
+            exec_string(cstr)
+        }
+    }
+}
+
 #[main]
-pub fn main() { unsafe { ::std::process::exit(main_0() as i32) } }
+pub fn main() {
+    let mut shell = Shell::new();
+    let mut buf = [0i8; 100];
+
+    while 0 <= unsafe{ getcmd(buf.as_mut_ptr(), buf.len() as libc::c_int) } {
+        shell.exec_string(&mut buf)
+    }
+}
